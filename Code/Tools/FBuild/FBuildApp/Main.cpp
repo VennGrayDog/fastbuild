@@ -9,7 +9,6 @@
 
 #include "Core/Containers/Array.h"
 #include "Core/Env/Env.h"
-#include "Core/FileIO/FileIO.h"
 #include "Core/Process/Process.h"
 #include "Core/Process/SharedMemory.h"
 #include "Core/Process/SystemMutex.h"
@@ -46,8 +45,8 @@ void DisplayVersion();
     // TODO:MAC Implement CtrlHandler
     // TODO:LINUX Implement CtrlHandler
 #endif
-int WrapperMainProcess(const AString & args, const FBuildOptions& options, SystemMutex& finalProcess);
-int WrapperIntermediateProcess(const AString & args, const FBuildOptions& options);
+int WrapperMainProcess( const AString & args, const FBuildOptions & options, SystemMutex & finalProcess );
+int WrapperIntermediateProcess( const AString & args, const FBuildOptions & options );
 
 // Misc
 //------------------------------------------------------------------------------
@@ -207,12 +206,14 @@ int main(int argc, char * argv[])
 				DisplayVersion();
 				return FBUILD_OK; // exit app
 			}
-			else if ( thisArg == "-vs" )
+			else if ( ( thisArg == "-ide" ) || ( thisArg == "-vs" ) )
 			{
 				progressBar = false;
 				noOutputBuffering = true;
 				fixupErrorPaths = true;
-				wrapperMode = WRAPPER_MODE_MAIN_PROCESS;
+                #if defined( __WINDOWS__ )
+                    wrapperMode = WRAPPER_MODE_MAIN_PROCESS;
+                #endif
 				continue;
 			}
 			else if ( thisArg == "-wait" )
@@ -220,19 +221,25 @@ int main(int argc, char * argv[])
 				waitMode = true;
 				continue;
 			}
-			else if ( thisArg == "-wrapper")
-			{
-				wrapperMode = WRAPPER_MODE_MAIN_PROCESS;
-				continue;
-			}
+   			else if ( thisArg == "-wrapper")
+    		{
+                #if defined( __WINDOWS__ )
+		    		wrapperMode = WRAPPER_MODE_MAIN_PROCESS;
+                #endif
+		    	continue;
+   			}
 			else if ( thisArg == "-wrapperintermediate")
 			{
-				wrapperMode = WRAPPER_MODE_INTERMEDIATE_PROCESS;
+                #if defined( __WINDOWS__ )
+    				wrapperMode = WRAPPER_MODE_INTERMEDIATE_PROCESS;
+                #endif
 				continue;
 			}
 			else if ( thisArg == "-wrapperfinal")
 			{
-				wrapperMode = WRAPPER_MODE_FINAL_PROCESS;
+                #if defined( __WINDOWS__ )
+    				wrapperMode = WRAPPER_MODE_FINAL_PROCESS;
+                #endif
 				continue;
 			}
 
@@ -275,13 +282,8 @@ int main(int argc, char * argv[])
 		}
 	}
 
-    //Need to set WorkingDir parameter here because global mutex names depend on workingDir.
+    // Global mutex names depend on workingDir which is managed by FBuildOptions
     FBuildOptions options;
-    {
-        AString workingDir;
-        VERIFY(FileIO::GetCurrentDir(workingDir));
-        options.SetWorkingDir(workingDir);
-    }
 
 	if ( wrapperMode == WRAPPER_MODE_INTERMEDIATE_PROCESS )
 	{
@@ -316,7 +318,7 @@ int main(int argc, char * argv[])
 		{
 			if ( waitMode == false )
 			{
-				OUTPUT( "FBuild: Error: Another instance of FASTBuild is already running." );
+				OUTPUT( "FBuild: Error: Another instance of FASTBuild is already running in '%s'.", options.GetWorkingDir().Get() );
 				return FBUILD_ALREADY_RUNNING;
 			}
 
@@ -436,6 +438,9 @@ void DisplayHelp()
 	OUTPUT( " -dist          Allow distributed compilation.\n"
 	        " -fixuperrorpaths Reformat error paths to be VisualStudio friendly.\n"
 			" -help          Show this help.\n"
+            " -ide           Enable multiple options when building from an IDE.\n"
+            "                Enables: -noprogress, -nooutputbuffering\n"
+            "                -fixuperrorpaths & -wrapper (Windows)\n"
 			" -jX            Explicitly set worker thread count X, instead of\n"
 			"                default of NUMBER_OF_PROCESSORS. Set to 0 to build\n"
 			"                everything in the main thread.\n"
@@ -451,13 +456,11 @@ void DisplayHelp()
 			"                down building.\n"
 			" -version       Print version and exit. No other work will be\n"
 			"                performed.\n"
-			" -vs            VisualStudio mode. Same as '-noprogress',\n"
-			"                '-nooutputbuffering', '-fixuperrorpaths'\n"
-			"                & '-wrapper'.\n"
+			" -vs            VisualStudio mode. Same as -ide.\n"
 			" -wait          Wait for a previous build to complete before starting.\n"
 			"                (Slower than building both targets in one invocation).\n"
-			" -wrapper       Spawn a sub-process to gracefully handle termination\n"
-			"                from Visual Studio.\n"
+			" -wrapper       (Windows only) Spawn a sub-process to gracefully handle\n"
+            "                termination from Visual Studio.\n"
 			"----------------------------------------------------------------------\n" );
 }
 
@@ -507,7 +510,7 @@ void DisplayVersion()
 
 // WrapperMainProcess
 //------------------------------------------------------------------------------
-int WrapperMainProcess( const AString & args, const FBuildOptions& options, SystemMutex& finalProcess )
+int WrapperMainProcess( const AString & args, const FBuildOptions & options, SystemMutex & finalProcess )
 {
 	// Create SharedMemory to communicate between Main and Final process
 	SharedMemory sm;
@@ -520,8 +523,7 @@ int WrapperMainProcess( const AString & args, const FBuildOptions& options, Syst
 	argsCopy += " -wrapperintermediate";
 
 	Process p;
-    const char* workingDir = options.GetWorkingDir().IsEmpty() ? nullptr : options.GetWorkingDir().Get();
-	if ( !p.Spawn( "fbuild.exe", argsCopy.Get(), workingDir, nullptr, true ) ) // true = forward output to our tty
+	if ( !p.Spawn( "fbuild.exe", argsCopy.Get(), options.GetWorkingDir().Get(), nullptr, true ) ) // true = forward output to our tty
 	{
 		return FBUILD_FAILED_TO_SPAWN_WRAPPER;
 	}
@@ -551,15 +553,14 @@ int WrapperMainProcess( const AString & args, const FBuildOptions& options, Syst
 
 // WrapperIntermediateProcess
 //------------------------------------------------------------------------------
-int WrapperIntermediateProcess( const AString & args, const FBuildOptions& options  )
+int WrapperIntermediateProcess( const AString & args, const FBuildOptions & options  )
 {
 	// launch final process
 	AStackString<> argsCopy( args );
 	argsCopy += " -wrapperfinal";
 
 	Process p;
-    const char* workingDir = options.GetWorkingDir().IsEmpty() ? nullptr : options.GetWorkingDir().Get();
-    if (!p.Spawn("fbuild.exe", argsCopy.Get(), workingDir, nullptr, true)) // true = forward output to our tty
+	if ( !p.Spawn( "fbuild.exe", argsCopy.Get(), options.GetWorkingDir().Get(), nullptr, true ) ) // true = forward output to our tty
 	{
 		return FBUILD_FAILED_TO_SPAWN_WRAPPER_FINAL;
 	}

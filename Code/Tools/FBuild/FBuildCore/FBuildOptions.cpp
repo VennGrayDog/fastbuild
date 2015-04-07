@@ -11,7 +11,12 @@
 // Core
 #include "Core/Env/Env.h"
 #include "Core/FileIO/PathUtils.h"
-#include "Core/Math/CRC32.h"
+#include "Core/Math/Murmur3.h"
+
+// system
+#if defined( __WINDOWS__ )
+    #include <windows.h> // for QueryDosDeviceA
+#endif
 
 // CONSTRUCTOR - FBuildOptions
 //------------------------------------------------------------------------------
@@ -33,6 +38,7 @@ FBuildOptions::FBuildOptions()
 , m_WrapperChild( false )
 , m_FixupErrorPaths( false )
 , m_StopOnFirstError( true )
+, m_WorkingDirHash( 0 )
 {
 #ifdef DEBUG
 	//m_ShowInfo = true; // uncomment this to enable spam when debugging
@@ -40,17 +46,19 @@ FBuildOptions::FBuildOptions()
 
 	// Default to NUMBER_OF_PROCESSORS
 	m_NumWorkerThreads = Env::GetNumProcessors();
+
+	// Default working dir is the system working dir
+    AStackString<> workingDir;
+    VERIFY( FileIO::GetCurrentDir( workingDir ) );
+    SetWorkingDir( workingDir );
 }
 
 // FBuildOptions::SetWorkingDir
 //------------------------------------------------------------------------------
 void FBuildOptions::SetWorkingDir( const AString & path )
 {
+    ASSERT( !path.IsEmpty() );
 	m_WorkingDir = path;
-	if ( m_WorkingDir.IsEmpty() )
-	{
-		return;
-	}
 
 	// clean path
 	PathUtils::FixupFolderPath( m_WorkingDir );
@@ -72,51 +80,61 @@ void FBuildOptions::SetWorkingDir( const AString & path )
 			m_WorkingDir[ 0 ] = ( 'A' + ( m_WorkingDir[ 0 ] - 'a' ) );
 		}
 	#endif
-}
 
-AString FBuildOptions::GetMainProcessMutexName() const
-{
-    AString result;
-    if(m_WorkingDir.IsEmpty())
-    {
-        result = "Global\\FASTBuild";
-    }
-    else
-    {
-        uint32_t workingDirCRC = CRC32::CalcLower(m_WorkingDir);
-        result.Format("Global\\FASTBuild-0x%08x", workingDirCRC);
-    }
-    return result;
-}
+    // Generate Mutex/SharedMemory names
+    #if defined( __WINDOWS__ ) || defined( __OSX__ )
+        #if defined( __WINDOWS__ )
+            // convert subst drive mappings to the read path
+            // (so you can't compile from the real path and the subst path at the
+            // same time which would cause problems)
+            AStackString<> canonicalPath;
+            if ( ( m_WorkingDir.GetLength() >= 2 ) &&
+                 ( m_WorkingDir[ 1 ] == ':' ) &&
+                 ( m_WorkingDir[ 0 ] >= 'A' ) &&
+                 ( m_WorkingDir[ 0 ] <= 'Z' ) )
+            {
+                // get drive letter without slash
+                AStackString<> driveLetter( m_WorkingDir.Get(), m_WorkingDir.Get() + 2 );
 
-AString FBuildOptions::GetFinalProcessMutexName() const
-{
-    AString result;
-    if (m_WorkingDir.IsEmpty())
-    {
-        result = "Global\\FASTBuild_Final";
-    }
-    else
-    {
-        uint32_t workingDirCRC = CRC32::CalcLower(m_WorkingDir);
-        result.Format("Global\\FASTBuild_Final-0x%08x", workingDirCRC);
-    }
-    return result;
-}
+                // get real path for drive letter (could be the same, or a subst'd path)
+                char actualPath[ MAX_PATH ];
+                actualPath[ 0 ] = '\000';
+                VERIFY( QueryDosDeviceA( driveLetter.Get(), actualPath, MAX_PATH ) );
 
-AString FBuildOptions::GetSharedMemoryName() const
-{
-    AString result;
-    if (m_WorkingDir.IsEmpty())
-    {
-        result = "FASTBuildSharedMemory";
-    }
-    else
-    {
-        uint32_t workingDirCRC = CRC32::CalcLower(m_WorkingDir);
-        result.Format("FASTBuildSharedMemory_%08x", workingDirCRC);
-    }
-    return result;
+                // if returned path is of format "\??\C:\Folder"...
+                if ( AString::StrNCmp( actualPath, "\\??\\", 4 ) == 0 )
+                {
+                    // .. then it means the working dir is a subst folder
+                    // trim the "\\??\\" and use the real path as a base
+                    canonicalPath = &actualPath[ 4 ];
+                    canonicalPath += ( m_WorkingDir.Get() + 2 ); // add everything after the subst drive letter
+                }
+                else
+                {
+                    // The path was already a real path (QueryDosDevice returns the volume only)
+                    canonicalPath = m_WorkingDir;
+                }
+            }
+            else
+            {
+                // a UNC or other funky path - just leave it as is
+                canonicalPath = m_WorkingDir;
+            }
+        #elif defined( __OSX__ )
+            AStackString<> canonicalPath( m_WorkingDir );
+        #endif
+
+        // case insensitive
+        canonicalPath.ToLower();
+    #elif defined( __LINUX__ )
+        // case sensitive
+        AStackString<> canonicalPath( m_WorkingDir );
+    #endif
+
+    m_WorkingDirHash = Murmur3::Calc32( canonicalPath );
+    m_ProcessMutexName.Format( "Global\\FASTBuild-0x%08x", m_WorkingDirHash );
+    m_FinalProcessMutexName.Format( "Global\\FASTBuild_Final-0x%08x", m_WorkingDirHash );
+    m_SharedMemoryName.Format( "FASTBuildSharedMemory_%08x", m_WorkingDirHash );
 }
 
 //------------------------------------------------------------------------------
